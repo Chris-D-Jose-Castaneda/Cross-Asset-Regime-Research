@@ -1,18 +1,19 @@
 # app.py — Macro-Credit Regime Radar (dynamic, concise)
 
 from __future__ import annotations
+import os
 import numpy as np, pandas as pd, matplotlib.pyplot as plt, streamlit as st, yfinance as yf
 from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
 from sklearn.metrics import roc_auc_score
 from matplotlib.ticker import PercentFormatter
+from dotenv import load_dotenv
+from fredapi import Fred
 
-# ── FRED key (auto, no UI) ────────────────────────────────────────────────────
-try:
-    from fredapi import Fred
-    from fred_api_key import API_KEY
-    USE_FRED = bool(API_KEY)
-except Exception:
-    API_KEY, USE_FRED = "", False
+# ── Env / keys ────────────────────────────────────────────────────────────────
+# Put FRED_API_KEY=your_key in .env at repo root
+load_dotenv()
+API_KEY = os.getenv("FRED_API_KEY", "")
+USE_FRED = bool(API_KEY)
 
 # ── Page / style ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Macro-Credit Regime Radar", layout="wide")
@@ -70,7 +71,8 @@ def load_macro(start: str) -> pd.DataFrame:
     cols = {}
     for key, (sid, units) in FRED_SERIES.items():
         s = fred.get_series(sid, units=units) if units else fred.get_series(sid)
-        s.name = key; cols[key] = s
+        s.name = key
+        cols[key] = s
     df = pd.concat(cols.values(), axis=1).sort_index()
     df = df.loc[df.index >= start]
     df = weekly_align(df)
@@ -106,7 +108,6 @@ def fit_regimes(series: pd.Series, k: int):
     if probs.shape[0] <= probs.shape[1]:
         probs = probs.T
     P = pd.DataFrame(probs, index=y.index, columns=[f"Regime{i}" for i in range(k)])
-    # high-stress = regime with highest conditional mean
     means = []
     for j in range(k):
         pj = P.iloc[:, j].values
@@ -135,9 +136,12 @@ mkts  = load_markets(START)
 st.title("Macro-Credit Regime Radar")
 
 if macro.empty:
-    st.warning("FRED key missing/invalid (`fred_api_key.py`). Showing SPY only.")
-    fig, ax = plt.subplots(); mkts["SPY_cum"].plot(ax=ax, label="SPY total return")
-    ax.legend(); st.pyplot(fig); st.stop()
+    st.warning("No macro data loaded. Ensure FRED_API_KEY is set in your .env file. Showing SPY only.")
+    fig, ax = plt.subplots()
+    mkts["SPY_cum"].plot(ax=ax, label="SPY total return")
+    ax.legend()
+    st.pyplot(fig)
+    st.stop()
 
 # Composite + regimes
 mcsr, drivers = build_mcsr(macro, WEIGHTS, ROLL_YEARS, SMOOTH_W)
@@ -149,24 +153,34 @@ c1, c2 = st.columns([2,1])
 with c1:
     st.subheader("Composite stress index (MCSR)")
     fig, ax = plt.subplots()
-    mcsr["MCSR"].plot(ax=ax, label="MCSR"); mcsr["MCSR_smooth"].plot(ax=ax, label="MCSR (smooth)")
-    ax.set_ylabel("z-weighted level"); ax.legend(); st.pyplot(fig)
+    mcsr["MCSR"].plot(ax=ax, label="MCSR")
+    mcsr["MCSR_smooth"].plot(ax=ax, label="MCSR (smooth)")
+    ax.set_ylabel("z-weighted level")
+    ax.legend()
+    st.pyplot(fig)
 with c2:
     st.subheader("P(High-stress)")
-    fig, ax = plt.subplots(); Phigh.plot(ax=ax); ax.set_ylim(0,1); ax.set_ylabel("Probability"); st.pyplot(fig)
+    fig, ax = plt.subplots()
+    Phigh.plot(ax=ax)
+    ax.set_ylim(0,1)
+    ax.set_ylabel("Probability")
+    st.pyplot(fig)
     st.caption(f"Regime means (std): {means}.  High-stress = Regime{hi_idx}")
 
 # ── Overlay: shaded regimes on returns ─────────────────────────────────────────
 st.subheader("Regimes over total return (shaded = high stress)")
 picked = st.multiselect("Series", ["SPY_cum","HYG_cum","LQD_cum"], default=["SPY_cum","HYG_cum","LQD_cum"])
 overlay = data[picked].join(Regime).dropna()
-fig, ax = plt.subplots(figsize=(10,5)); overlay[picked].plot(ax=ax); shade(ax, overlay["Regime"]==1)
-ax.set_title("Total return with high-stress shading"); st.pyplot(fig)
+fig, ax = plt.subplots(figsize=(10,5))
+overlay[picked].plot(ax=ax)
+shade(ax, overlay["Regime"]==1)
+ax.set_title("Total return with high-stress shading")
+st.pyplot(fig)
 
 # ── Dynamic betas (window + regime-conditioned) ────────────────────────────────
 st.subheader("Driver → Asset betas (bp per 1σ driver shock, weekly)")
 X_all = data[drivers].pct_change().replace([np.inf, -np.inf], np.nan)
-X_all = (X_all - X_all.mean()) / X_all.std(ddof=0)  # z-change proxy
+X_all = (X_all - X_all.mean()) / X_all.std(ddof=0)
 Y_all = data[["SPY_ret","HYG_ret","LQD_ret"]]
 
 cutoff = X_all.index.max() - pd.Timedelta(weeks=BETA_YEARS*52)
@@ -201,16 +215,18 @@ zvec = pd.Series({
     "UnemploymentRate": z_ur, "PCE_yoy": z_pce, "RetailSales_yoy": z_rsa
 }).reindex(drivers).fillna(0.0)
 
-proj = (betas.T @ zvec).sort_values()   # weekly return projection using current betas
+proj = (betas.T @ zvec).sort_values()
 mcsr_dz = pd.Series(WEIGHTS).reindex(drivers).fillna(0.0) @ zvec
 
 c3, c4 = st.columns([2,1])
 with c3:
     fig, ax = plt.subplots()
     (proj * 100).plot(kind="barh", ax=ax, title="Projected 1-week returns (%)")
-    ax.set_xlabel("Projected return (%)"); ax.xaxis.set_major_formatter(PercentFormatter(100))
+    ax.set_xlabel("Projected return (%)")
+    ax.xaxis.set_major_formatter(PercentFormatter(100))
     xmax = float(np.nanmax(np.abs(proj))) * 100
-    if xmax < 0.5: ax.set_xlim(-0.6, 0.6)
+    if xmax < 0.5:
+        ax.set_xlim(-0.6, 0.6)
     st.pyplot(fig)
 with c4:
     st.metric("Implied ΔMCSR (z-units)", f"{mcsr_dz:+.2f}")
@@ -221,7 +237,8 @@ tmp = data[["SPY_ret","HYG_ret","LQD_ret"]].join((Phigh>0.5).astype(int).rename(
 st.dataframe((tmp.groupby("Regime")[["SPY_ret","HYG_ret","LQD_ret"]].agg(["mean","std"])*100).round(2))
 
 st.subheader("Out-of-sample AUC (stress proxy)")
-oos_cut = int(len(Phigh)*0.7); oos_idx = Phigh.index[oos_cut:]
+oos_cut = int(len(Phigh)*0.7)
+oos_idx = Phigh.index[oos_cut:]
 thr = data.reindex(oos_idx)["HY_OAS"].quantile(0.8)
 y_true = (data.reindex(oos_idx)["HY_OAS"] >= thr).astype(int)
 auc = roc_auc_score(y_true, Phigh.reindex(oos_idx).values)
