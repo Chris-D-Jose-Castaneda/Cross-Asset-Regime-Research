@@ -1,5 +1,4 @@
 # requirements.txt
-refinitiv-data
 pandas
 numpy
 matplotlib
