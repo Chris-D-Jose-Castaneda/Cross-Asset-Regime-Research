@@ -1,0 +1,9 @@
+# requirements.txt
+refinitiv-data
+pandas
+numpy
+matplotlib
+scikit-learn
+statsmodels
+plotly
+yfinance
